@@ -380,6 +380,8 @@ public final class PruxAdbEngine {
         if (c.matches("(cmd )?appops set " + PKG + " (RUN_IN_BACKGROUND|RUN_ANY_IN_BACKGROUND|START_FOREGROUND) allow")) return true;
         if (c.matches("(cmd )?appops set " + PKG + " PROJECT_MEDIA allow")) return true;
         if (c.matches("dumpsys deviceidle whitelist \\+" + PKG)) return true;
+        if (c.matches("pm grant " + PKG + " android[.]permission[.]WRITE_SECURE_SETTINGS")) return true;
+        if (c.matches("pm check-permission android[.]permission[.]WRITE_SECURE_SETTINGS " + PKG)) return true;
         if (c.matches("am start -n " + PKG + "/\\.ProjectionActivity")) return true;
         if (c.equals("cmd notification list")) return true;
         if (c.matches("cmd notification snooze --package " + PKG + " .*")) return true;
