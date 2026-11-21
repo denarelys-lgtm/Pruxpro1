@@ -8,20 +8,23 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.example.detectcamera.core.PruxCore;
+
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.muntashirakon.adb.AdbPairingRequiredException;
 import io.github.muntashirakon.adb.AdbStream;
 import io.github.muntashirakon.adb.AbsAdbConnectionManager;
-import com.example.detectcamera.core.PruxCore;
 
 public final class PruxAdbEngine {
 
@@ -29,7 +32,7 @@ public final class PruxAdbEngine {
 
     private static final long FIRST_RECONNECT_DELAY_MS = 2_000L;
     private static final long MAX_RECONNECT_DELAY_MS   = 60_000L;
-    private static final long HEALTH_CHECK_MS          = 30_000L; // Optimizado: menos frecuencia para ahorrar batería/CPU
+    private static final long HEALTH_CHECK_MS          = 30_000L;
     private static final long HEARTBEAT_TIMEOUT_MS     = 2_000L;
     private static final long COMMAND_TIMEOUT_MS       = 7_000L;
     private static final long AUTOCONNECT_TIMEOUT_MS   = 5_000L;
@@ -38,28 +41,18 @@ public final class PruxAdbEngine {
             "com.example.detectcamera.PRUX_ADB_STATE";
     private static final String EXTRA_AVAILABLE = "available";
 
+    private static final String PKG = "[A-Za-z0-9._]+";
+
     private static volatile PruxAdbEngine instance;
 
     private final Context context;
+    private final Object connectionLock = new Object();
 
-    private final ExecutorService executor =
-            Executors.newFixedThreadPool(2, r -> {
-                Thread t = new Thread(r, "PruxAdb-Worker");
-                t.setDaemon(true);
-                return t;
-            });
-
-    private final ScheduledExecutorService monitor =
-            Executors.newSingleThreadScheduledExecutor(r -> {
-                Thread t = new Thread(r, "PruxAdb-Monitor");
-                t.setDaemon(true);
-                return t;
-            });
+    private ExecutorService executor;
+    private ScheduledExecutorService monitor;
 
     private final AtomicBoolean monitoring       = new AtomicBoolean(false);
     private final AtomicBoolean reconnectRunning = new AtomicBoolean(false);
-
-    private final Object connectionLock = new Object();
 
     private volatile boolean connected;
     private volatile long    reconnectDelay = FIRST_RECONNECT_DELAY_MS;
@@ -67,6 +60,7 @@ public final class PruxAdbEngine {
 
     private PruxAdbEngine(@NonNull Context context) {
         this.context = context.getApplicationContext();
+        initExecutors();
     }
 
     @NonNull
@@ -81,10 +75,33 @@ public final class PruxAdbEngine {
         return instance;
     }
 
-    public boolean isConnected() { return connected; }
-    public int getLastKnownPort() { return lastKnownPort; }
+    private void initExecutors() {
+        if (executor == null || executor.isShutdown() || executor.isTerminated()) {
+            executor = Executors.newFixedThreadPool(2, r -> {
+                Thread t = new Thread(r, "PruxAdb-Worker");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+        if (monitor == null || monitor.isShutdown() || monitor.isTerminated()) {
+            monitor = Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread t = new Thread(r, "PruxAdb-Monitor");
+                t.setDaemon(true);
+                return t;
+            });
+        }
+    }
+
+    public boolean isConnected() {
+        return connected;
+    }
+
+    public int getLastKnownPort() {
+        return lastKnownPort;
+    }
 
     public void startPersistentMonitoring() {
+        initExecutors();
         if (!monitoring.compareAndSet(false, true)) {
             return;
         }
@@ -93,13 +110,19 @@ public final class PruxAdbEngine {
                 this::monitorConnection,
                 5_000L,
                 HEALTH_CHECK_MS,
-                TimeUnit.MILLISECONDS);
+                TimeUnit.MILLISECONDS
+        );
     }
 
     public void shutdown() {
         monitoring.set(false);
-        monitor.shutdownNow();
-        executor.shutdownNow();
+        reconnectRunning.set(false);
+        if (monitor != null) {
+            monitor.shutdownNow();
+        }
+        if (executor != null) {
+            executor.shutdownNow();
+        }
         synchronized (connectionLock) {
             connected = false;
         }
@@ -124,32 +147,34 @@ public final class PruxAdbEngine {
     }
 
     private boolean performHeartbeat() {
-        try {
-            AbsAdbConnectionManager manager =
-                    PruxAdbConnectionManager.getInstance(context);
-
-            try (AdbStream stream = manager.openStream("host:version")) {
-                BufferedReader reader = new BufferedReader(
-                        new InputStreamReader(
-                                stream.openInputStream(),
-                                StandardCharsets.UTF_8));
-
-                long deadline = System.currentTimeMillis() + HEARTBEAT_TIMEOUT_MS;
-                while (System.currentTimeMillis() < deadline) {
-                    if (reader.ready()) {
-                        return reader.readLine() != null;
-                    }
-                    Thread.sleep(50L); // Pausa optimizada para liberar CPU
-                }
-                return false;
+        Future<Boolean> future = executor.submit(() -> {
+            AbsAdbConnectionManager manager = PruxAdbConnectionManager.getInstance(context);
+            try (AdbStream stream = manager.openStream("host:version");
+                 BufferedReader reader = new BufferedReader(
+                         new InputStreamReader(stream.openInputStream(), StandardCharsets.UTF_8))) {
+                String line = reader.readLine();
+                return line != null;
             }
+        });
+        try {
+            Boolean ok = future.get(HEARTBEAT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            return Boolean.TRUE.equals(ok);
+        } catch (TimeoutException te) {
+            future.cancel(true);
+            Log.w(TAG, "Heartbeat timeout");
+            return false;
         } catch (Throwable t) {
+            future.cancel(true);
             Log.w(TAG, "Heartbeat falló: " + friendly(t));
             return false;
         }
     }
 
     private void requestReconnect() {
+        if (!monitoring.get()) {
+            return;
+        }
+        initExecutors();
         if (!reconnectRunning.compareAndSet(false, true)) {
             return;
         }
@@ -180,8 +205,7 @@ public final class PruxAdbEngine {
                 lastKnownPort = port;
             }
 
-            AbsAdbConnectionManager manager =
-                    PruxAdbConnectionManager.getInstance(context);
+            AbsAdbConnectionManager manager = PruxAdbConnectionManager.getInstance(context);
 
             boolean ok = false;
             if (port > 0) {
@@ -203,7 +227,6 @@ public final class PruxAdbEngine {
 
             markDisconnected();
             return false;
-
         } catch (AdbPairingRequiredException e) {
             markDisconnected();
             return false;
@@ -214,7 +237,7 @@ public final class PruxAdbEngine {
     }
 
     private boolean ensureConnected(@NonNull AbsAdbConnectionManager manager)
-            throws IOException, InterruptedException {
+            throws IOException {
         synchronized (connectionLock) {
             if (connected) {
                 return true;
@@ -240,7 +263,8 @@ public final class PruxAdbEngine {
                     notifyAdbState(true);
                     return true;
                 }
-            } catch (AdbPairingRequiredException ignored) {}
+            } catch (AdbPairingRequiredException ignored) {
+            }
 
             connected = false;
             return false;
@@ -248,6 +272,7 @@ public final class PruxAdbEngine {
     }
 
     public void pair(@Nullable String host, int port, @Nullable String code, @Nullable Callback callback) {
+        initExecutors();
         executor.execute(() -> {
             boolean success = false;
             String message;
@@ -266,13 +291,20 @@ public final class PruxAdbEngine {
                 }
 
                 int activePort = AdbPortResolver.enableAndGetWirelessPort(context);
-                if (activePort > 0) lastKnownPort = activePort;
+                if (activePort > 0) {
+                    lastKnownPort = activePort;
+                }
 
                 boolean connectedNow = false;
                 try {
-                    if (activePort > 0) connectedNow = manager.connect("127.0.0.1", activePort);
-                    if (!connectedNow) connectedNow = manager.autoConnect(context, AUTOCONNECT_TIMEOUT_MS);
-                } catch (AdbPairingRequiredException ignored) {}
+                    if (activePort > 0) {
+                        connectedNow = manager.connect("127.0.0.1", activePort);
+                    }
+                    if (!connectedNow) {
+                        connectedNow = manager.autoConnect(context, AUTOCONNECT_TIMEOUT_MS);
+                    }
+                } catch (AdbPairingRequiredException ignored) {
+                }
 
                 synchronized (connectionLock) {
                     connected = connectedNow;
@@ -280,10 +312,13 @@ public final class PruxAdbEngine {
 
                 message = connectedNow ? "Emparejado y conectado" : "Emparejado; esperando conexión";
                 startPersistentMonitoring();
-                if (!connectedNow) requestReconnect();
-
+                if (!connectedNow) {
+                    requestReconnect();
+                }
             } catch (Throwable t) {
-                synchronized (connectionLock) { connected = false; }
+                synchronized (connectionLock) {
+                    connected = false;
+                }
                 message = friendly(t);
                 notifyAdbState(false);
             }
@@ -299,14 +334,22 @@ public final class PruxAdbEngine {
             try {
                 AdbPortResolver.enableWirelessDebugging(context);
                 int port = AdbPortResolver.enableAndGetWirelessPort(context);
-                if (port > 0) lastKnownPort = port;
+                if (port > 0) {
+                    lastKnownPort = port;
+                }
 
                 AbsAdbConnectionManager manager = PruxAdbConnectionManager.getInstance(context);
-                if (port > 0) success = manager.connect("127.0.0.1", port);
-                if (!success) success = manager.autoConnect(context, AUTOCONNECT_TIMEOUT_MS);
+                if (port > 0) {
+                    success = manager.connect("127.0.0.1", port);
+                }
+                if (!success) {
+                    success = manager.autoConnect(context, AUTOCONNECT_TIMEOUT_MS);
+                }
 
                 if (success) {
-                    synchronized (connectionLock) { connected = true; }
+                    synchronized (connectionLock) {
+                        connected = true;
+                    }
                     reconnectDelay = FIRST_RECONNECT_DELAY_MS;
                     message = "ADB conectado";
                     notifyAdbState(true);
@@ -331,6 +374,7 @@ public final class PruxAdbEngine {
         }
 
         final String cmd = command.trim();
+        initExecutors();
         executor.execute(() -> {
             boolean success = false;
             String output = "";
@@ -351,45 +395,67 @@ public final class PruxAdbEngine {
     }
 
     @NonNull
-    private String executeShell(@NonNull AbsAdbConnectionManager manager, @NonNull String command) throws Exception {
-        try (AdbStream stream = manager.openStream("shell:" + command)) {
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(stream.openInputStream(), StandardCharsets.UTF_8));
-
-            StringBuilder output = new StringBuilder();
-            long deadline = System.currentTimeMillis() + COMMAND_TIMEOUT_MS;
-
-            while (System.currentTimeMillis() < deadline) {
-                if (reader.ready()) {
-                    String line = reader.readLine();
-                    if (line == null) break;
+    private String executeShell(@NonNull AbsAdbConnectionManager manager, @NonNull String command)
+            throws Exception {
+        Future<String> future = executor.submit(() -> {
+            try (AdbStream stream = manager.openStream("shell:" + command);
+                 BufferedReader reader = new BufferedReader(
+                         new InputStreamReader(stream.openInputStream(), StandardCharsets.UTF_8))) {
+                StringBuilder output = new StringBuilder();
+                String line;
+                while ((line = reader.readLine()) != null) {
                     output.append(line).append('\n');
-                } else {
-                    Thread.sleep(30L); // Pausa pasiva optimizada
                 }
+                return output.toString();
             }
-            return output.toString();
+        });
+
+        try {
+            String result = future.get(COMMAND_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            return result != null ? result : "";
+        } catch (TimeoutException te) {
+            future.cancel(true);
+            throw new IOException("Timeout ejecutando comando shell: " + command, te);
         }
     }
 
-    private static final String PKG = "[A-Za-z0-9._]+";
-
     private static boolean isAllowed(@Nullable String command) {
-        if (command == null) return false;
+        if (command == null) {
+            return false;
+        }
         String c = command.trim();
-        if (c.matches("(cmd )?appops set " + PKG + " (RUN_IN_BACKGROUND|RUN_ANY_IN_BACKGROUND) allow")) return true;
-        if (c.matches("dumpsys deviceidle whitelist [+]" + PKG)) return true;
-        if (c.matches("pm grant " + PKG + " android[.]permission[.]WRITE_SECURE_SETTINGS")) return true;
-        if (c.matches("pm check-permission android[.]permission[.]WRITE_SECURE_SETTINGS " + PKG)) return true;
-        if (c.matches("am start -n " + PKG + "/\\.ProjectionActivity")) return true;
-        if (c.equals("cmd notification list")) return true;
-        if (c.matches("cmd notification snooze --package " + PKG + " .*")) return true;
+        if (c.matches("(cmd )?appops set " + PKG + " (RUN_IN_BACKGROUND|RUN_ANY_IN_BACKGROUND|START_FOREGROUND) allow")) {
+            return true;
+        }
+        if (c.matches("(cmd )?appops set " + PKG + " PROJECT_MEDIA allow")) {
+            return true;
+        }
+        if (c.matches("dumpsys deviceidle whitelist \\+" + PKG)) {
+            return true;
+        }
+        if (c.matches("pm grant " + PKG + " android[.]permission[.]WRITE_SECURE_SETTINGS")) {
+            return true;
+        }
+        if (c.matches("pm check-permission android[.]permission[.]WRITE_SECURE_SETTINGS " + PKG)) {
+            return true;
+        }
+        if (c.matches("am start -n " + PKG + "/\\.ProjectionActivity")) {
+            return true;
+        }
+        if (c.equals("cmd notification list")) {
+            return true;
+        }
+        if (c.matches("cmd notification snooze --package " + PKG + " .*")) {
+            return true;
+        }
         return false;
     }
 
     private void markDisconnected() {
         synchronized (connectionLock) {
-            if (!connected) return;
+            if (!connected) {
+                return;
+            }
             connected = false;
         }
         notifyAdbState(false);
@@ -406,19 +472,26 @@ public final class PruxAdbEngine {
                 core.setState("adb", state ? "RUNNING" : "DISCONNECTED");
                 core.publish(state ? "ADB_CONNECTED" : "ADB_DISCONNECTED", "PruxAdbEngine", null);
             }
-        } catch (Throwable ignored) {}
+        } catch (Throwable ignored) {
+        }
     }
 
     @NonNull
     private static String friendly(@NonNull Throwable t) {
         Throwable current = t;
-        while (current.getCause() != null) current = current.getCause();
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
         String message = current.getMessage();
-        return (message == null || message.trim().isEmpty()) ? current.getClass().getSimpleName() : message;
+        return (message == null || message.trim().isEmpty())
+                ? current.getClass().getSimpleName()
+                : message;
     }
 
     private static void post(@Nullable Callback callback, boolean success, @NonNull String message) {
-        if (callback != null) callback.onResult(success, message);
+        if (callback != null) {
+            callback.onResult(success, message);
+        }
     }
 
     public interface Callback {
