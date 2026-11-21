@@ -1,0 +1,314 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#101722">
+  <meta name="description" content="Panel central PRUX para localizar y abrir los servidores web de tus dispositivos.">
+  <title>PRUX · Central</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b111a;--panel:#151f2c;--line:#263548;--muted:#9aabba;--text:#edf4fa;--accent:#49d6a3;--warn:#f5bd62;--bad:#ff7777}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0,#173044 0,transparent 38%),var(--bg);color:var(--text);font:15px system-ui,-apple-system,Segoe UI,Roboto,sans-serif;min-height:100vh}
+    main{width:min(1050px,calc(100% - 28px));margin:38px auto}.top{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:24px}.brand{display:flex;align-items:center;gap:12px}.logo{width:44px;height:44px;border-radius:14px;background:#183b3a;color:var(--accent);display:grid;place-items:center;font-weight:900;font-size:20px}.eyebrow{color:var(--accent);font-size:11px;letter-spacing:.16em;font-weight:800}.title{font-size:26px;font-weight:800;margin:2px 0}.sub{color:var(--muted);font-size:13px}.panel,.device{background:linear-gradient(145deg,#182433,#111a25);border:1px solid var(--line);border-radius:18px;padding:20px;box-shadow:0 14px 40px #0003}.login{max-width:430px;margin:8vh auto}.field{display:block;width:100%;padding:13px 14px;margin:10px 0;background:#0d1621;border:1px solid #34465a;border-radius:10px;color:var(--text);font:inherit}.btn{border:0;border-radius:10px;padding:12px 16px;background:var(--accent);color:#06251c;font-weight:800;cursor:pointer}.btn.secondary{background:#253548;color:var(--text);border:1px solid #3a4b60}.btn:disabled{opacity:.5;cursor:wait}.error{color:var(--bad);min-height:20px;font-size:13px}.toolbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:24px 0 14px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(270px,1fr));gap:14px}.device h3{margin:0 0 5px;font-size:17px;overflow-wrap:anywhere}.meta{color:var(--muted);font-size:12px;line-height:1.7;overflow-wrap:anywhere}.status{display:inline-flex;padding:5px 9px;border-radius:999px;background:#263548;color:#d7e3ed;font-size:11px;font-weight:800;margin:12px 0}.status.online{background:#143b32;color:#75e4ba}.status.pending{background:#46351d;color:#ffd28b}.status.offline{background:#42252b;color:#ffaaaa}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}.empty{padding:32px;text-align:center;color:var(--muted);border:1px dashed #3a4b60;border-radius:14px}.hidden{display:none!important}a{color:var(--accent);overflow-wrap:anywhere}.foot{color:#718396;font-size:12px;margin:22px 2px}@media(max-width:600px){main{margin:20px auto}.top{align-items:flex-start}.title{font-size:22px}.panel,.device{padding:16px}}
+  </style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div class="brand"><div class="logo">P</div><div><div class="eyebrow">PRUX CORE ENGINE</div><div class="title">Central</div><div class="sub">Directorio seguro de dispositivos y servidores</div></div></div>
+    <button id="logout" class="btn secondary hidden" type="button">Cerrar sesión</button>
+  </header>
+
+  <section id="loginPanel" class="panel login">
+    <div class="eyebrow">ACCESO ADMINISTRADOR</div><h2>Iniciar sesión</h2>
+    <p class="sub">Usa la cuenta de administrador creada en Firebase Authentication.</p>
+    <form id="loginForm">
+      <label class="sub" for="email">Correo electrónico</label>
+      <input id="email" class="field" type="email" autocomplete="username" required>
+      <label class="sub" for="password">Contraseña</label>
+      <input id="password" class="field" type="password" autocomplete="current-password" required>
+      <button id="loginButton" class="btn" type="submit">Entrar al panel</button>
+      <div id="loginError" class="error" role="alert"></div>
+    </form>
+  </section>
+
+  <section id="dashboard" class="hidden">
+    <div class="panel"><div class="eyebrow">ESTADO DE LA FLOTA</div><h2 id="summary">Conectando con Firebase…</h2><div class="sub">Selecciona un dispositivo y autoriza el acceso remoto desde tu sesión de administrador. No tendrás que escribir la contraseña HTTP del teléfono.</div></div>
+    <div class="toolbar"><strong>Dispositivos registrados</strong><button id="refresh" class="btn secondary" type="button">Actualizar</button></div>
+    <div id="devices" class="grid"><div class="empty">Cargando dispositivos…</div></div>
+    <div id="dataError" class="error" role="alert"></div>
+  </section>
+  <p class="foot">PRUX Central · Firebase almacena el directorio y el estado. Los enlaces públicos de Quick Tunnel pueden cambiar cuando el túnel se reinicia.</p>
+</main>
+
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+<script>
+  const firebaseConfig = {
+    apiKey: "AIzaSyBkVYUtzxjoRrKm06guifzWtbda5C1mGes",
+    authDomain: "detectcameracentral.firebaseapp.com",
+    databaseURL: "https://detectcameracentral-default-rtdb.firebaseio.com",
+    projectId: "detectcameracentral",
+    storageBucket: "detectcameracentral.firebasestorage.app",
+    messagingSenderId: "152057893669",
+    appId: "1:152057893669:web:c622adce9e7f30c7ce40cc"
+  };
+
+  firebase.initializeApp(firebaseConfig);
+  const auth = firebase.auth();
+  const db = firebase.database();
+  const $ = id => document.getElementById(id);
+  let devicesRef = null;
+  let currentAdminUid = null;
+
+  function showError(message) { $('dataError').textContent = message || ''; }
+
+  function makeText(tag, text, className) {
+    const el = document.createElement(tag);
+    el.textContent = text == null ? '' : String(text);
+    if (className) el.className = className;
+    return el;
+  }
+
+  function formatTime(value) {
+    if (value === null || value === undefined || value === '') return 'Sin fecha';
+    const numeric = typeof value === 'number' ? value : Number(value);
+    const date = Number.isFinite(numeric) ? new Date(numeric) : new Date(String(value));
+    return Number.isNaN(date.getTime()) ? 'Fecha desconocida' : date.toLocaleString();
+  }
+
+  function isValidTunnelUrl(value) {
+    return typeof value === 'string'
+      && /^https:\/\/[a-z0-9-]+\.trycloudflare\.com\/?$/i.test(value.trim());
+  }
+
+  function bytesToHex(bytes) {
+    return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  function bytesToBase64Url(bytes) {
+    let binary = '';
+    for (const byte of bytes) binary += String.fromCharCode(byte);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  async function sha256Hex(value) {
+    const bytes = new TextEncoder().encode(value);
+    const digest = await crypto.subtle.digest('SHA-256', bytes);
+    return bytesToHex(new Uint8Array(digest));
+  }
+
+  async function createRemoteTicket(deviceId) {
+    if (!currentAdminUid) throw new Error('La sesión de administrador no está activa.');
+
+    const secretBytes = new Uint8Array(32);
+    crypto.getRandomValues(secretBytes);
+    const ticket = bytesToBase64Url(secretBytes);
+    const ticketHash = await sha256Hex(ticket);
+    const now = Date.now();
+    const expiresAt = now + 120000;
+    const authRef = db.ref('deviceAuth/' + deviceId);
+
+    const result = await authRef.transaction(current => {
+      const state = current && typeof current === 'object' ? current : {};
+      const generation = Number(state.generation || 0);
+      if (!Number.isSafeInteger(generation) || generation < 0) return;
+      state.generation = generation;
+      state.ticket = {
+        hash: ticketHash,
+        createdAt: now,
+        expiresAt: expiresAt,
+        generation: generation
+      };
+      return state;
+    }, undefined, false);
+
+    if (!result.committed) {
+      throw new Error('Firebase no pudo guardar el ticket. Comprueba las reglas de /deviceAuth.');
+    }
+
+    return ticket;
+  }
+
+  async function openRemotePanel(device) {
+    if (!isValidTunnelUrl(device.url)) {
+      showError('Este dispositivo todavía no tiene una URL de túnel válida.');
+      return;
+    }
+
+    const remoteWindow = window.open('about:blank', '_blank');
+    if (!remoteWindow) {
+      showError('El navegador bloqueó la pestaña nueva. Permite ventanas emergentes para PRUX Central e inténtalo otra vez.');
+      return;
+    }
+
+    const targetName = 'pruxRemote_' + Date.now();
+    remoteWindow.name = targetName;
+    remoteWindow.document.title = 'Conectando con PRUX';
+    remoteWindow.document.body.textContent = 'Autorizando acceso remoto…';
+
+    try {
+      showError('');
+      const ticket = await createRemoteTicket(device.id);
+      const form = document.createElement('form');
+      form.method = 'POST';
+      form.action = device.url.trim().replace(/\/+$/, '') + '/auth/exchange';
+      form.target = targetName;
+      form.style.display = 'none';
+
+      const input = document.createElement('input');
+      input.type = 'hidden';
+      input.name = 'ticket';
+      input.value = ticket;
+      form.appendChild(input);
+      document.body.appendChild(form);
+      form.submit();
+      form.remove();
+    } catch (error) {
+      try { remoteWindow.close(); } catch (_) {}
+      showError('No se pudo autorizar el dispositivo: ' + (error.message || error));
+    }
+  }
+
+  async function revokeRemoteAccess(deviceId) {
+    if (!currentAdminUid) return;
+    const confirmed = window.confirm('¿Revocar todas las sesiones remotas de este dispositivo?');
+    if (!confirmed) return;
+
+    try {
+      const ref = db.ref('deviceAuth/' + deviceId);
+      const result = await ref.transaction(current => {
+        const state = current && typeof current === 'object' ? current : {};
+        const generation = Number(state.generation || 0);
+        if (!Number.isSafeInteger(generation) || generation < 0) return;
+        state.generation = generation + 1;
+        delete state.ticket;
+        return state;
+      }, undefined, false);
+      if (!result.committed) throw new Error('Firebase rechazó la revocación.');
+      showError('Sesiones remotas revocadas para el dispositivo ' + deviceId + '.');
+    } catch (error) {
+      showError('No se pudo revocar el acceso: ' + (error.message || error));
+    }
+  }
+
+  function renderDevices(snapshot) {
+    const root = $('devices');
+    root.replaceChildren();
+    const records = [];
+
+    if (snapshot && typeof snapshot.forEach === 'function') {
+      snapshot.forEach(child => {
+        const val = child.val();
+        records.push({
+          id: child.key,
+          ...(val && typeof val === 'object' ? val : {})
+        });
+      });
+    }
+
+    records.sort((a, b) => Number(b.timestamp || 0) - Number(a.timestamp || 0));
+    $('summary').textContent = records.length + (records.length === 1
+      ? ' dispositivo registrado' : ' dispositivos registrados');
+
+    if (!records.length) {
+      root.append(makeText('div', 'Todavía no hay dispositivos registrados.', 'empty'));
+      return;
+    }
+
+    for (const device of records) {
+      try {
+        const card = document.createElement('article');
+        card.className = 'device';
+        card.append(makeText('h3', device.modelo || 'Dispositivo Android'));
+        card.append(makeText('div', 'ID: ' + device.id, 'meta'));
+        card.append(makeText('div', 'Plataforma: ' + (device.plataforma || 'Android'), 'meta'));
+
+        const state = String(device.estado || 'desconocido');
+        const badge = makeText('span', state.replaceAll('_', ' '), 'status');
+        if (state === 'conectado' && isValidTunnelUrl(device.url)) badge.classList.add('online');
+        else if (state.indexOf('pendiente') >= 0) badge.classList.add('pending');
+        else badge.classList.add('offline');
+        card.append(badge);
+        card.append(makeText('div', 'Último reporte: ' + formatTime(device.timestamp), 'meta'));
+
+        if (isValidTunnelUrl(device.url)) {
+          card.append(makeText('div', 'Túnel: ' + device.url.trim(), 'meta'));
+          const actions = document.createElement('div');
+          actions.className = 'actions';
+
+          const openButton = makeText('button', 'Abrir panel remoto ↗', 'btn');
+          openButton.type = 'button';
+          openButton.addEventListener('click', () => openRemotePanel(device));
+          actions.appendChild(openButton);
+
+          const revokeButton = makeText('button', 'Revocar sesiones', 'btn secondary');
+          revokeButton.type = 'button';
+          revokeButton.addEventListener('click', () => revokeRemoteAccess(device.id));
+          actions.appendChild(revokeButton);
+          card.appendChild(actions);
+        } else {
+          card.append(makeText('div', 'URL pública todavía no disponible.', 'meta'));
+        }
+        root.append(card);
+      } catch (err) {
+        root.append(makeText('article', 'Error mostrando dispositivo ' + device.id + ': ' + err.message, 'device'));
+      }
+    }
+  }
+
+  function subscribe() {
+    if (devicesRef) devicesRef.off();
+    devicesRef = db.ref('dispositivos');
+    devicesRef.on('value', renderDevices, error => {
+      showError('No se pudo leer el directorio: ' + error.message + '. Comprueba que el UID de esta cuenta esté autorizado en /admins.');
+    });
+  }
+
+  $('loginForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    $('loginButton').disabled = true;
+    $('loginError').textContent = '';
+    try {
+      await auth.signInWithEmailAndPassword($('email').value.trim(), $('password').value);
+    } catch (error) {
+      $('loginError').textContent = error.message;
+    } finally {
+      $('loginButton').disabled = false;
+    }
+  });
+
+  $('logout').addEventListener('click', () => auth.signOut());
+  $('refresh').addEventListener('click', () => { showError(''); subscribe(); });
+
+  auth.onAuthStateChanged(async user => {
+    if (devicesRef) {
+      devicesRef.off();
+      devicesRef = null;
+    }
+    currentAdminUid = null;
+    $('loginPanel').classList.toggle('hidden', !!user);
+    $('dashboard').classList.toggle('hidden', !user);
+    $('logout').classList.toggle('hidden', !user);
+    $('devices').replaceChildren();
+    showError('');
+
+    if (!user) return;
+
+    try {
+      const adminSnapshot = await db.ref('admins/' + user.uid).once('value');
+      if (adminSnapshot.val() !== true) {
+        $('loginError').textContent = 'Esta cuenta no tiene permisos de administrador en PRUX Central.';
+        await auth.signOut();
+        return;
+      }
+      currentAdminUid = user.uid;
+      subscribe();
+    } catch (error) {
+      showError('No se pudo validar el administrador: ' + (error.message || error));
+    }
+  });
+</script>
+</body>
+</html>
