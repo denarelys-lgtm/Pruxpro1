@@ -7,14 +7,23 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.core.content.ContextCompat;
+
 import com.example.detectcamera.core.PruxCore;
 
+import java.util.Collections;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class BootReceiver extends BroadcastReceiver {
 
     private static final String TAG = "DetectCameraBoot";
+    public static final String ACTION_RESTART_SERVICE = "com.example.detectcamera.RESTART_SERVICE";
+
+    private static final long INITIAL_DELAY_MS = 1_500L;
+    private static final long BETWEEN_SERVICES_DELAY_MS = 1_000L;
 
     private static final Set<String> BOOT_ACTIONS = Set.of(
             Intent.ACTION_BOOT_COMPLETED,
@@ -25,88 +34,120 @@ public class BootReceiver extends BroadcastReceiver {
             "com.miui.intent.action.BOOT_COMPLETED"
     );
 
+    private static final AtomicBoolean BOOT_IN_PROGRESS = new AtomicBoolean(false);
+
     @Override
-    public void onReceive(Context context, Intent intent) {
+    public void onReceive(@NonNull Context context, @Nullable Intent intent) {
         if (intent == null) {
             return;
         }
 
         final String action = intent.getAction();
-        
-        // Permitir también acción de reinicio por tarea removida o arranque normal
-        boolean isBootAction = action != null && BOOT_ACTIONS.contains(action);
-        boolean isRestartAction = intent.getComponent() != null && 
-                                  intent.getComponent().getClassName().equals(ServerService.class.getName());
+        final boolean isBootAction = action != null && BOOT_ACTIONS.contains(action);
+        final boolean isRestartComponent = intent.getComponent() != null
+                && ServerService.class.getName().equals(intent.getComponent().getClassName());
+        final boolean isRestartAction = ACTION_RESTART_SERVICE.equals(action);
 
-        if (!isBootAction && !isRestartAction && !"com.example.detectcamera.RESTART_SERVICE".equals(action)) {
+        if (!isBootAction && !isRestartComponent && !isRestartAction) {
             return;
         }
 
-        Log.i(TAG, "Evento de inicio detectado (" + action + "). Programando inicio escalonado de Prux...");
-        PruxCore core = PruxCore.get();
-        if (core != null) core.publish("DEVICE_BOOT", "BootReceiver", java.util.Collections.singletonMap("action", action != null ? action : "RESTART"));
+        final String effectiveAction = action != null ? action : "RESTART";
+        Log.i(TAG, "Evento de inicio detectado (" + effectiveAction + "). Programando inicio escalonado de Prux...");
+
+        publishBootEvent(effectiveAction);
+
+        if (!BOOT_IN_PROGRESS.compareAndSet(false, true)) {
+            Log.i(TAG, "Inicio escalonado ya en curso; se omite disparo duplicado.");
+            return;
+        }
 
         final Context appContext = context.getApplicationContext();
         final PendingResult pending = goAsync();
+        final Handler mainHandler = new Handler(Looper.getMainLooper());
 
-        // Lanzamiento escalonado para no saturar la CPU
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            new Thread(() -> {
+        mainHandler.postDelayed(() -> {
+            Thread bootThread = new Thread(() -> {
                 try {
                     startCoreServices(appContext);
-                    
-                    // Espera corta entre servicios para estabilizar memoria
-                    Thread.sleep(1500L);
-                    
+
+                    try {
+                        Thread.sleep(BETWEEN_SERVICES_DELAY_MS);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
+
                     startAdbAndPrivileges(appContext);
                     Log.i(TAG, "Servicios de Prux iniciados correctamente de forma escalonada.");
                 } catch (Throwable t) {
                     Log.e(TAG, "Error iniciando Prux después del boot", t);
                 } finally {
-                    pending.finish();
+                    BOOT_IN_PROGRESS.set(false);
+                    try {
+                        pending.finish();
+                    } catch (Throwable ignored) {
+                    }
                 }
-            }, "Prux-Boot").start();
-        }, 2000L); 
+            }, "Prux-Boot");
+            bootThread.setDaemon(true);
+            bootThread.start();
+        }, INITIAL_DELAY_MS);
     }
 
-    private void startCoreServices(Context context) {
-        ContextCompat.startForegroundService(
-                context,
-                new Intent(context, ServerService.class));
+    private void publishBootEvent(@NonNull String action) {
+        try {
+            PruxCore core = PruxCore.get();
+            if (core != null) {
+                core.publish("DEVICE_BOOT", "BootReceiver", Collections.singletonMap("action", action));
+            }
+        } catch (Throwable t) {
+            Log.w(TAG, "No se pudo publicar DEVICE_BOOT en PruxCore: " + t.getMessage());
+        }
+    }
 
-        // Nota: En arranque en frío (Direct Boot), la cámara puede requerir desbloqueo previo del usuario.
+    private void startCoreServices(@NonNull Context context) {
+        try {
+            ContextCompat.startForegroundService(
+                    context,
+                    new Intent(context, ServerService.class));
+        } catch (Throwable t) {
+            Log.e(TAG, "Error iniciando ServerService", t);
+        }
+
+        // En arranque en frío (Direct Boot), la cámara puede requerir desbloqueo previo del usuario.
         try {
             ContextCompat.startForegroundService(
                     context,
                     new Intent(context, CameraService.class));
-        } catch (Exception e) {
-            Log.w(TAG, "CameraService diferido por restricciones de arranque seguro del sistema.");
+        } catch (Throwable t) {
+            Log.w(TAG, "CameraService diferido por restricciones de arranque seguro del sistema: " + t.getMessage());
         }
     }
 
-    private void startAdbAndPrivileges(Context context) {
-        PruxAdbEngine engine = PruxAdbEngine.get(context);
-        engine.startPersistentMonitoring();
+    private void startAdbAndPrivileges(@NonNull Context context) {
+        try {
+            PruxAdbEngine engine = PruxAdbEngine.get(context);
+            engine.startPersistentMonitoring();
 
-        engine.reconnect((success, message) -> {
-            if (!success) {
-                Log.w(TAG, "Reconexión ADB tras el boot no completada: " + message);
-                return;
-            }
+            engine.reconnect((success, message) -> {
+                if (!success) {
+                    Log.w(TAG, "Reconexión ADB tras el boot no completada: " + message);
+                    return;
+                }
 
-            Log.i(TAG, "ADB conectado tras el boot. Otorgando permisos de pantalla...");
+                Log.i(TAG, "ADB conectado tras el boot. Otorgando permisos de pantalla...");
 
-            try {
-                PruxPrivilegedBridge.applyBackgroundExemptions(context, () -> {
-                    PruxPrivilegedBridge.prepareMediaProjection(context);
-                    // Conserva la ruta de inicialización que tenía el proyecto original.
-                    // Android puede mostrar su interfaz de autorización o bloquear el
-                    // lanzamiento en segundo plano según versión/estado del dispositivo.
-                    PruxPrivilegedBridge.startProjectionActivity(context);
-                });
-            } catch (Throwable t) {
-                Log.e(TAG, "Error aplicando privilegios tras ADB", t);
-            }
-        });
+                try {
+                    PruxPrivilegedBridge.applyBackgroundExemptions(context, () -> {
+                        PruxPrivilegedBridge.prepareMediaProjection(context);
+                        PruxPrivilegedBridge.startProjectionActivity(context);
+                    });
+                } catch (Throwable t) {
+                    Log.e(TAG, "Error aplicando privilegios tras ADB", t);
+                }
+            });
+        } catch (Throwable t) {
+            Log.e(TAG, "Error inicializando PruxAdbEngine tras el boot", t);
+        }
     }
 }
