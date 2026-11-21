@@ -237,7 +237,7 @@ public final class PruxAdbEngine {
     }
 
     private boolean ensureConnected(@NonNull AbsAdbConnectionManager manager)
-            throws IOException {
+            throws IOException, InterruptedException {
         synchronized (connectionLock) {
             if (connected) {
                 return true;
