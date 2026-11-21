@@ -16,15 +16,32 @@ public final class PruxPrivilegedBridge {
         PruxAdbEngine.get(context).reconnect(callback);
     }
 
-    public static void applyBackgroundExemptions(Context context) {
-        String pkg = context.getPackageName();
-        PruxAdbEngine engine = PruxAdbEngine.get(context);
-        engine.executeAllowed("cmd appops set " + pkg + " RUN_IN_BACKGROUND allow", null);
-        engine.executeAllowed("cmd appops set " + pkg + " RUN_ANY_IN_BACKGROUND allow", null);
-        engine.executeAllowed("cmd appops set " + pkg + " START_FOREGROUND allow", null);
-        engine.executeAllowed("dumpsys deviceidle whitelist +" + pkg, null);
+    public static void applyBackgroundExemptions(Context context, Runnable onComplete) {
+        final String pkg = context.getPackageName();
+        final PruxAdbEngine engine = PruxAdbEngine.get(context);
+        final String[] commands = new String[] {
+                "pm grant " + pkg + " android.permission.WRITE_SECURE_SETTINGS",
+                "cmd appops set " + pkg + " RUN_IN_BACKGROUND allow",
+                "cmd appops set " + pkg + " RUN_ANY_IN_BACKGROUND allow",
+                "dumpsys deviceidle whitelist +" + pkg
+        };
+        executeNext(engine, commands, 0, onComplete);
     }
 
+    private static void executeNext(PruxAdbEngine engine, String[] commands,
+                                    int index, Runnable onComplete) {
+        if (index >= commands.length) {
+            Log.i(TAG, "Verificación/aplicación de exenciones ADB finalizada.");
+            if (onComplete != null) onComplete.run();
+            return;
+        }
+        final String command = commands[index];
+        engine.executeAllowed(command, (ok, output) -> {
+            Log.i(TAG, command + " => " + ok + (output == null || output.isEmpty() ? "" : " | " + output));
+            executeNext(engine, commands, index + 1, onComplete);
+        });
+    }
+    
     public static void prepareMediaProjection(Context context) {
         String pkg = context.getPackageName();
         PruxAdbEngine engine = PruxAdbEngine.get(context);
